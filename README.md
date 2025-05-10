@@ -1,15 +1,7 @@
 # ios-background-audio
 
-To install dependencies:
+An Example Demonstrating How to enable background audio in browser on safari.
+Meaning with ringer switch enabled.
 
-```bash
-bun install
-```
-
-To run:
-
-```bash
-bun run src/index.ts
-```
-
-This project was created using `bun init` in bun v1.2.13. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+## TLDR
+  `window.navigator.audioSession.type = "playback"`

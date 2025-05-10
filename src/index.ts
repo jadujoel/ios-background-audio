@@ -1,141 +1,93 @@
-import * as webllm from "@mlc-ai/web-llm";
+import * as ac from "can-start-audio-context"
+import * as macros from "../macros.ts" with { type: "macro" }
+import type { EncodedItem } from '../build.ts'
 
-// list of models: https://github.com/mlc-ai/web-llm-chat/blob/ac629bc115c69d7563ded5031418a1f96ebf52e5/app/constant.ts#L197
-import { type Models as ModelNames, DEFAULT_MODEL_BASES } from "./models.ts"
+/**
+ * - https://bugs.webkit.org/show_bug.cgi?id=237322
+ * - Allow audio being played with the ring/silent switch set to silent.
+ * - According to CanIUse: supported in Safari 16.4 and above.
+ * After testing on BrowserStack:
+ * - ios18.1 - chrome - supported
+ * - ios18.1 - safari - supported
+ * - ios17.6.1 - firefox 133.3 - supported
+ * - ios16 - safari 16 - supported
+ * - ios16 - chrome 92.0.4515.90 - supported
+ * - ios15 - chrome 92.0.4515.90 - not supported
+ * - ios15 - safari 15 - not supported
+ */
+export function backgroundAudioFix(): void {
+	interface AudioSession {
+			/** @default "auto" */
+			type: "ambient" | "playback" | "auto";
+	}
+	type NavigatorWithAudioSession = Navigator & { audioSession: AudioSession; };
+	function isNavigatorWithAudioSession(navigator: Navigator): navigator is NavigatorWithAudioSession {
+			return (navigator as NavigatorWithAudioSession).audioSession !== undefined;
+	}
+	if (typeof window !== "undefined" && isNavigatorWithAudioSession(window.navigator)) {
+			window.navigator.audioSession.type = "playback";
+	}
+}
 
-class LLM {
+class SoundManager {
 	constructor(
-		public engine: webllm.MLCEngine,
-		public systemMessage = "You are a helpful AI assistant.",
-		public temperature = 1,
-		public history: string[][] = [],
-		public onchunk: (chunk: webllm.ChatCompletionChunk) => void = (chunk) => {
-			console.log(chunk.choices[0]?.delta.content ?? "");
-			if (chunk.usage) {
-				console.log(chunk.usage); // only last chunk has usage
-			}
-		},
+		public readonly context: AudioContext,
+		public readonly cache: Map<string, AudioBuffer>,
+		public readonly items: EncodedItem[]
 	) {}
-	static async FromModelName(
-		// selectedModel: ModelNames = "Llama-3.1-8B-Instruct-q4f32_1-MLC",
-		// selectedModel: ModelNames = "Qwen3-0.6B-q4f32_1-MLC",
-		selectedModel: ModelNames = "Qwen3-8B-q4f16_1-MLC",
-		initProgressCallback: webllm.InitProgressCallback = (initProgress) => {
-			console.log("init progress", initProgress);
-		},
-	) {
-		const engine = await webllm.CreateMLCEngine(
-			selectedModel,
-			{
-				initProgressCallback,
-			}, // engineConfig
-		);
-		return new LLM(engine);
-	}
-	setSystemMessage(message: string) {
-		this.systemMessage = message;
-	}
-	setOnChunk(callback: (chunk: webllm.ChatCompletionChunk) => void) {
-		this.onchunk = callback;
-	}
-	setTemperature(temperature: number) {
-		this.temperature = temperature;
-	}
-	async sendMessage(content: string, history = this.history): Promise<string> {
-		this.history.push([this.systemMessage, content]);
-		console.log("Send Message", content)
-		const previous: webllm.ChatCompletionMessageParam[] = history.flatMap(
-			(item) => ({
-				role: "user",
-				content: item[1],
-			}),
-		);
-		const chunks = await this.engine.chat.completions.create({
-			messages: [
-				{ role: "system", content: this.systemMessage },
-				...previous,
-				{ role: "user", content },
-			],
-			temperature: this.temperature,
-			stream: true, // <-- Enable streaming
-			stream_options: { include_usage: true },
-		});
-
-		let reply = "";
-		for await (const chunk of chunks) {
-			console.log("Reply Chunk", chunk)
-			reply += chunk.choices[0]?.delta.content || "";
-			this.history.at(-1)?.push(reply);
-			this.onchunk(chunk);
+	async fetch(source: string): Promise<AudioBuffer | undefined> {
+		const existing = this.cache.get(source)
+		if (existing !== undefined) {
+			return existing
 		}
-		return await this.engine.getMessage();
+
+		const item = this.items.find(x => x.source === source)
+		if (item === undefined) {
+			return undefined
+		}
+
+		const response = await fetch(item.outname).catch(() => undefined)
+		if (response === undefined || !response.ok) {
+			return undefined
+		}
+
+		const arrayBuffer = await response.arrayBuffer()
+		const audioBuffer = await this.context.decodeAudioData(arrayBuffer)
+		this.cache.set(source, audioBuffer)
+		return audioBuffer
+	}
+	static fromContext(context: AudioContext) {
+		return new SoundManager(context, new Map(), macros.encoded())
 	}
 }
 
 async function main() {
-	const selected = localStorage.getItem("jadujoel/model-choice") ?? "Qwen3-8B-q4f16_1-MLC"
-	console.log("Selected Model", selected)
-	const model = DEFAULT_MODEL_BASES
-	// biome-ignore lint/style/noNonNullAssertion: <explanation>
-	const input = <HTMLInputElement> document.getElementById("model-choice")!
-	// biome-ignore lint/style/noNonNullAssertion: <explanation>
-	const list = <HTMLDataListElement> document.getElementById("models")!
-	for (const name of model) {
-		const option = document.createElement("option")
-		option.value = name.name
-		option.innerText = name.family
-		if (option.value === selected) {
-			option.selected = true
-			input.value = selected
-		}
-		list.appendChild(option)
-	}
+	backgroundAudioFix()
 
-	input.addEventListener("change", ev => {
-		const selected = (ev.target as unknown as { value: string }).value
-		localStorage.setItem("jadujoel/model-choice", selected)
-		window.location.reload()
+	const app = <HTMLDivElement> document.getElementById("app")
+	const statel = document.createElement("div")
+	app.appendChild(statel)
+
+	statel.innerText = "Context Starting..."
+	const context = await ac.start(undefined, { sampleRate: 48_000, latencyHint: "playback" })
+	statel.innerText = `Context State: ${context.state}`
+	context.addEventListener("statechange", ev => {
+		statel.innerText = `Context State: ${context.state}`
 	})
 
+	const sm = SoundManager.fromContext(context)
 
-	// register service worker
-	await navigator.serviceWorker.register("service-worker.js");
-
-	// biome-ignore lint/style/noNonNullAssertion: <explanation>
-	const loadStatus = document.getElementById("loadstatus")!;
-	const chatInput = document.getElementById("chatinput") as HTMLTextAreaElement;
-	const submitButton = document.getElementById("send") as HTMLButtonElement;
-
-	const chatOutput = document.getElementById(
-		"chatoutput",
-	) as HTMLTextAreaElement;
-
-	const llm = await LLM.FromModelName(undefined, (initProgress) => {
-		loadStatus.innerText = initProgress.text;
-	}).catch((error) => {
-		console.log("Load LLM Error:", error)
-		loadStatus.innerText = `Error: ${JSON.stringify(error)}`;
-		if (error?.name?.includes("WebGPUNotAvailableError")) {
-			loadStatus.innerText += "\n\nWebGPU is not available on this device.";
-			loadStatus.innerText += "\n\nOn iphone you can enable it in Advanced Settings for Safari.";
-		}
-	});
-	if (llm === undefined) {
-		return;
+	const buffer = await sm.fetch("rosa10")
+	if (buffer === undefined) {
+		throw new Error("Failed To Fetch Soundfile")
 	}
-	llm.setSystemMessage("You are a helpful AI assistant.");
-	llm.setOnChunk((chunk) => {
-		chatOutput.textContent += chunk.choices[0]?.delta.content ?? "";
-	});
 
-	submitButton.addEventListener("click", async () => {
-		const content = chatInput.value;
-		chatOutput.textContent += `You: ${content}\n`;
-		chatInput.value = "";
-		chatOutput.textContent += "AI:\n";
-		await llm.sendMessage(content);
-		chatOutput.textContent += "\n";
-	});
+	const source = context.createBufferSource()
+	source.buffer = buffer
+	source.loop = true
+	source.connect(context.destination)
+
+	source.start()
+
 }
-
-main();
+main()
